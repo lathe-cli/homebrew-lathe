@@ -1,26 +1,26 @@
 class Lathe < Formula
   desc "Generate agent-friendly Cobra CLIs from API specs"
   homepage "https://github.com/lathe-cli/lathe"
-  version "0.4.0"
+  version "0.4.2"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.0/lathe_0.4.0_darwin_arm64.tar.gz"
-      sha256 "63a7a0b5863fa190ccb15074a8c4a6b5e012771c62eadc72927e44851167fe61"
+      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.2/lathe_0.4.2_darwin_arm64.tar.gz"
+      sha256 "ac60d9d1019b264e45f85a496530201dd519b6e96ab16d1f59546be017e9529e"
     else
-      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.0/lathe_0.4.0_darwin_amd64.tar.gz"
-      sha256 "803517a2eb6b7db54fdb0d0fdf77718eaa3343d2e553e1a11101a0f13a5ee9c7"
+      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.2/lathe_0.4.2_darwin_amd64.tar.gz"
+      sha256 "9f60973f1398dba5bfae76e63e2190f2462e57fda0af43edb2edd17ec3c55877"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.0/lathe_0.4.0_linux_arm64.tar.gz"
-      sha256 "1da0d3ddb0ac67b75ddb46977b84762517ac32a22e298e9db7cad838d7e31133"
+      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.2/lathe_0.4.2_linux_arm64.tar.gz"
+      sha256 "2ad22b2852681a9320a83cda7932c497d19d2d711f746bf693ea9cb6ee51083a"
     else
-      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.0/lathe_0.4.0_linux_amd64.tar.gz"
-      sha256 "5e0b98b48ca2286706ee4f2e26cdf26bd1d293d83ca75c9cc3813c775982510c"
+      url "https://github.com/lathe-cli/lathe/releases/download/v0.4.2/lathe_0.4.2_linux_amd64.tar.gz"
+      sha256 "9abeccb4305bea8016852cac3fae36f4d3a5589f1c158fbed99981932458b236"
     end
   end
 
