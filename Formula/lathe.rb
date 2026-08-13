@@ -2,7 +2,7 @@ class Lathe < Formula
   desc "Generate agent-friendly Cobra CLIs from API specs"
   homepage "https://github.com/lathe-cli/lathe"
   version "0.4.2"
-  license "MIT"
+  license "Apache-2.0"
 
   on_macos do
     if Hardware::CPU.arm?
