@@ -2,6 +2,9 @@ name: update-formula
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
   repository_dispatch:
     types:
       - homebrew-package-release
@@ -12,6 +15,8 @@ on:
         required: false
         default: latest
         type: string
+  schedule:
+    - cron: "15 */6 * * *"
 
 permissions:
   contents: read
@@ -22,28 +27,42 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check Formula syntax and invariants
+      - name: Check Formula syntax, invariants, and updater tests
         shell: bash
         run: |
           set -euo pipefail
           ruby -c Formula/lathe.rb
-          ruby -e '
-            text = File.read("Formula/lathe.rb")
-            ver_match = text.match(/^\s*version\s+"([^"]+)"\s*$/)
-            abort("missing version in Formula/lathe.rb") unless ver_match
-            ver = ver_match[1]
-            semver = /\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z/
-            abort("formula version must be stable SemVer: #{ver}") unless ver.match?(semver)
-            %w[darwin_arm64 darwin_amd64 linux_arm64 linux_amd64].each do |target|
-              url = "https://github.com/lathe-cli/lathe/releases/download/v#{ver}/lathe_#{ver}_#{target}.tar.gz"
-              pattern = /url\s+"#{Regexp.escape(url)}"\s*\n\s*sha256\s+"([0-9a-f]{64})"/
-              abort("missing or invalid URL/sha256 block for #{target}") unless text.match?(pattern)
-            end
+          ruby -c scripts/update-formula.rb
+          ruby -c test/update_formula_test.rb
+          ruby scripts/update-formula.rb --validate --formula Formula/lathe.rb
+          ruby test/update_formula_test.rb
+
+      - name: Load Formula with Homebrew when available
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew_bin=""
+          if command -v brew >/dev/null 2>&1; then
+            brew_bin="$(command -v brew)"
+          elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+            brew_bin="/home/linuxbrew/.linuxbrew/bin/brew"
+          fi
+          if [[ -z "$brew_bin" ]]; then
+            echo "Homebrew is not installed on this runner."
+            exit 0
+          fi
+          "$brew_bin" ruby -e '
+            require "formula"
+            f = Formulary::FromPathLoader.new("Formula/lathe.rb").get_formula(:default)
+            abort("unexpected formula name: #{f.name}") unless f.name == "lathe"
+            abort("invalid formula version: #{f.version}") unless f.version.to_s.match?(/\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z/)
+            abort("missing expected stable url: #{f.stable&.url}") unless f.stable&.url&.include?("v#{f.version}/lathe_#{f.version}_")
+            abort("missing valid stable checksum") unless f.stable&.checksum&.hexdigest&.match?(/\A[0-9a-f]{64}\z/)
           '
 
   update:
     needs: validate
-    if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -56,8 +75,8 @@ jobs:
           ref: refs/heads/main
           fetch-depth: 0
 
-      - name: Resolve and verify stable release
-        id: release
+      - name: Update Formula/lathe.rb from verified stable release
+        id: update
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,162 +87,30 @@ jobs:
           PAYLOAD_TAG: ${{ github.event.client_payload.tag }}
         run: |
           set -euo pipefail
+          args=(--formula Formula/lathe.rb --github-output "$GITHUB_OUTPUT")
           if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
-            if [[ -n "${PAYLOAD_PACKAGE:-}" && "$PAYLOAD_PACKAGE" != "lathe" ]]; then
-              echo "::error::Unexpected package payload: $PAYLOAD_PACKAGE"
-              exit 1
-            fi
-            raw_version="${PAYLOAD_VERSION:-${PAYLOAD_TAG:-}}"
+            target_version="${PAYLOAD_VERSION:-${PAYLOAD_TAG:-}}"
+            args+=(--package "${PAYLOAD_PACKAGE:-}" --version "$target_version" --tag "${PAYLOAD_TAG:-}")
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            args+=(--version "${INPUT_VERSION:-latest}")
           else
-            raw_version="${INPUT_VERSION:-latest}"
-            if [[ -z "$raw_version" || "$raw_version" == "latest" ]]; then
-              raw_version=$(gh api repos/lathe-cli/lathe/releases/latest --jq '.tag_name')
-            fi
+            args+=(--version latest)
           fi
-
-          version="${raw_version#v}"
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Invalid or non-stable SemVer version: $raw_version"
-            exit 1
-          fi
-
-          tag="v${version}"
-          release_json=$(gh api "repos/lathe-cli/lathe/releases/tags/${tag}")
-          if [[ "$(jq -r '.draft' <<< "$release_json")" != "false" ]]; then
-            echo "::error::Refusing draft release: ${tag}"
-            exit 1
-          fi
-          if [[ "$(jq -r '.prerelease' <<< "$release_json")" != "false" ]]; then
-            echo "::error::Refusing prerelease: ${tag}"
-            exit 1
-          fi
-
-          checksums_name="lathe_${version}_checksums.txt"
-          assets=$(jq -r '.assets[].name' <<< "$release_json")
-          for required in \
-            "$checksums_name" \
-            "lathe_${version}_darwin_arm64.tar.gz" \
-            "lathe_${version}_darwin_amd64.tar.gz" \
-            "lathe_${version}_linux_arm64.tar.gz" \
-            "lathe_${version}_linux_amd64.tar.gz"; do
-            if ! grep -Fxq "$required" <<< "$assets"; then
-              echo "::error::Missing release asset ${required} in ${tag}"
-              exit 1
-            fi
-          done
-
-          checksums_path="${RUNNER_TEMP}/${checksums_name}"
-          gh release download "$tag" \
-            --repo lathe-cli/lathe \
-            --pattern "$checksums_name" \
-            --output "$checksums_path" \
-            --clobber
-
-          {
-            echo "version=${version}"
-            echo "tag=${tag}"
-            echo "checksums=${checksums_path}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Render Formula/lathe.rb
-        id: render
-        shell: bash
-        env:
-          TARGET_VERSION: ${{ steps.release.outputs.version }}
-          CHECKSUMS_PATH: ${{ steps.release.outputs.checksums }}
-        run: |
-          set -euo pipefail
-          ruby -e '
-            formula_path = "Formula/lathe.rb"
-            target = ENV.fetch("TARGET_VERSION")
-            checksums_path = ENV.fetch("CHECKSUMS_PATH")
-            github_output = ENV.fetch("GITHUB_OUTPUT")
-
-            current_text = File.read(formula_path)
-            current_match = current_text.match(/^\s*version\s+"([^"]+)"\s*$/)
-            abort("missing current version in #{formula_path}") unless current_match
-            current = current_match[1]
-
-            if current == target
-              File.open(github_output, "a") { |f| f.puts("changed=false") }
-              exit 0
-            end
-            if Gem::Version.new(target) < Gem::Version.new(current)
-              abort("refusing downgrade from #{current} to #{target}")
-            end
-
-            sums = {}
-            File.readlines(checksums_path, chomp: true).each do |line|
-              next if line.strip.empty?
-              parts = line.split(/\s+/, 2)
-              next unless parts.length == 2
-              digest, name = parts
-              sums[name] = digest if digest.match?(/\A[0-9a-f]{64}\z/)
-            end
-
-            need = %w[darwin_arm64 darwin_amd64 linux_arm64 linux_amd64].each_with_object({}) do |arch, h|
-              asset = "lathe_#{target}_#{arch}.tar.gz"
-              digest = sums[asset]
-              abort("missing valid sha256 for #{asset}") unless digest
-              h[arch] = digest
-            end
-
-            rendered = <<~'\''RUBY'\''
-              class Lathe < Formula
-                desc "Generate agent-friendly Cobra CLIs from API specs"
-                homepage "https://github.com/lathe-cli/lathe"
-                version "__VERSION__"
-                license "Apache-2.0"
-
-                on_macos do
-                  if Hardware::CPU.arm?
-                    url "https://github.com/lathe-cli/lathe/releases/download/v__VERSION__/lathe___VERSION___darwin_arm64.tar.gz"
-                    sha256 "__DARWIN_ARM64__"
-                  else
-                    url "https://github.com/lathe-cli/lathe/releases/download/v__VERSION__/lathe___VERSION___darwin_amd64.tar.gz"
-                    sha256 "__DARWIN_AMD64__"
-                  end
-                end
-
-                on_linux do
-                  if Hardware::CPU.arm?
-                    url "https://github.com/lathe-cli/lathe/releases/download/v__VERSION__/lathe___VERSION___linux_arm64.tar.gz"
-                    sha256 "__LINUX_ARM64__"
-                  else
-                    url "https://github.com/lathe-cli/lathe/releases/download/v__VERSION__/lathe___VERSION___linux_amd64.tar.gz"
-                    sha256 "__LINUX_AMD64__"
-                  end
-                end
-
-                def install
-                  bin.install "lathe"
-                end
-
-                test do
-                  assert_match version.to_s, shell_output("#{bin}/lathe version")
-                end
-              end
-            RUBY
-
-            rendered = rendered
-              .gsub("__VERSION__", target)
-              .gsub("__DARWIN_ARM64__", need.fetch("darwin_arm64"))
-              .gsub("__DARWIN_AMD64__", need.fetch("darwin_amd64"))
-              .gsub("__LINUX_ARM64__", need.fetch("linux_arm64"))
-              .gsub("__LINUX_AMD64__", need.fetch("linux_amd64"))
-
-            File.write(formula_path, rendered)
-            File.open(github_output, "a") { |f| f.puts("changed=true") }
-          '
-          ruby -c Formula/lathe.rb
+          ruby scripts/update-formula.rb "${args[@]}"
 
       - name: Commit and push Formula update
-        if: steps.render.outputs.changed == 'true'
+        if: steps.update.outputs.changed == 'true'
         shell: bash
         env:
-          TARGET_TAG: ${{ steps.release.outputs.tag }}
+          TARGET_TAG: ${{ steps.update.outputs.tag }}
         run: |
           set -euo pipefail
+          ruby scripts/update-formula.rb --validate --formula Formula/lathe.rb
+          if [[ "$(git diff --name-only)" != "Formula/lathe.rb" ]]; then
+            echo "::error::Unexpected modified files before commit"
+            git status --short
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/lathe.rb
